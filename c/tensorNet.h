@@ -62,7 +62,7 @@ typedef nvinfer1::Dims3 Dims3;
 #define DIMS_W(x) x.w
 
 #ifndef NV_TENSORRT_MAJOR
-#define NV_TENSORRT_MAJOR 1
+#define NV_TENSORRT_MAJOR 8 // sebi: was 1, changed to 8 to easier code study (not dim the code, as Jetson nano uses TRT8.2)
 #define NV_TENSORRT_MINOR 0
 #endif
 #endif
@@ -161,6 +161,14 @@ enum modelType
 	MODEL_ENGINE		/**< TensorRT engine/plan */
 };
 
+//sebi:
+enum ONNXKind
+{
+	ONNX_SSD = 0,
+	ONNX_YOLO
+};
+//
+
 /**
  * Stringize function that returns modelType in text.
  * @ingroup tensorNet
@@ -178,6 +186,9 @@ modelType modelTypeFromStr( const char* str );
  * @ingroup tensorNet
  */
 modelType modelTypeFromPath( const char* path );
+
+//sebi
+ONNXKind ONNXKindFromStr(const char* str);
 
 /**
  * Profiling queries
@@ -792,6 +803,7 @@ protected:
 	deviceType    mDevice;
 	precisionType mPrecision;
 	modelType     mModelType;
+	ONNXKind	  mONNXKind;
 	cudaStream_t  mStream;
 	cudaEvent_t   mEventsGPU[PROFILER_TOTAL * 2];
 	timespec      mEventsCPU[PROFILER_TOTAL * 2];

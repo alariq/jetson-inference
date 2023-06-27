@@ -343,6 +343,17 @@ const char* profilerQueryToStr( profilerQuery query )
     return nullptr;
 }
 
+ONNXKind ONNXKindFromStr( const char* str )
+{
+	if( !str )
+		return ONNX_SSD;
+
+	if( strcasestr(str, "yolo") )
+		return ONNX_YOLO;
+	return ONNX_SSD;
+}
+
+
 //---------------------------------------------------------------------
 tensorNet::Logger tensorNet::gLogger;
 
@@ -1151,6 +1162,10 @@ bool tensorNet::LoadNetwork( const char* prototxt_path_, const char* model_path_
 	const std::string model_ext = fileExtension(model_path_);
 	const modelType   model_fmt = modelTypeFromStr(model_ext.c_str());
 
+	if(model_fmt  == MODEL_ONNX) {
+		mONNXKind = ONNXKindFromStr(model_path.c_str());
+	}
+
 	LogVerbose(LOG_TRT "detected model format - %s  (extension '.%s')\n", modelTypeToStr(model_fmt), model_ext.c_str());
 
 	if( model_fmt == MODEL_CUSTOM )
@@ -1505,7 +1520,6 @@ bool tensorNet::LoadEngine( nvinfer1::ICudaEngine* engine,
 		copyDims(&l.dims, &inputDims);
 		mInputs.push_back(l);
 	}
-
 
 	/*
 	 * setup network output buffers

@@ -33,6 +33,10 @@
 #include "filesystem.h"
 #include "logging.h"
 
+// YOLO dnn
+//#include <opencv2/cudaimgproc.hpp>
+#include <limits.h>
+
 
 #define OUTPUT_CVG  0	// Caffe has output coverage (confidence) heat map
 #define OUTPUT_BBOX 1	// Caffe has separate output layer for bounding box
@@ -341,7 +345,7 @@ detectNet* detectNet::Create( const commandLine& cmdLine )
 	}
 
 	// parse the model type
-	if( !FindModel(DETECTNET_MODEL_TYPE, modelName) )
+if( !FindModel(DETECTNET_MODEL_TYPE, modelName) )
 	{
 		const char* prototxt     = cmdLine.GetString("prototxt");
 		const char* input        = cmdLine.GetString("input_blob");
@@ -406,8 +410,13 @@ bool detectNet::allocDetections()
 	}
 	else if( IsModelType(MODEL_ONNX) )
 	{
-		mNumClasses = DIMS_H(mOutputs[OUTPUT_CONF].dims);
-		mMaxDetections = DIMS_C(mOutputs[OUTPUT_CONF].dims) /** mNumClasses*/;
+		if(mONNXKind == ONNX_SSD) {
+			mNumClasses = DIMS_H(mOutputs[OUTPUT_CONF].dims);
+			mMaxDetections = DIMS_C(mOutputs[OUTPUT_CONF].dims) /** mNumClasses*/;
+		} else { //ONNX_YOLO
+			mNumClasses = DIMS_C(mOutputs[OUTPUT_CONF].dims) - 4; // first 4 floats are bbox, then scores for each class
+			mMaxDetections = DIMS_H(mOutputs[OUTPUT_CONF].dims);
+		}
 		LogInfo(LOG_TRT "detectNet -- number of object classes: %u\n", mNumClasses);
 	}	
 	else
@@ -557,12 +566,25 @@ bool detectNet::preProcess( void* input, uint32_t width, uint32_t height, imageF
 	else if( IsModelType(MODEL_ONNX) )
 	{
 		// SSD (PyTorch / ONNX)
-		if( CUDA_FAILED(cudaTensorNormMeanRGB(input, format, width, height,
-									   mInputs[0].CUDA, GetInputWidth(), GetInputHeight(), 
-									   make_float2(0.0f, 1.0f), 
-									   make_float3(0.5f, 0.5f, 0.5f),
-									   make_float3(0.5f, 0.5f, 0.5f), 
-									   GetStream())) )
+		bool b_failed = true;
+		if(mONNXKind == ONNX_SSD) {
+			b_failed = CUDA_FAILED(cudaTensorNormMeanRGB(input, format, width, height,
+				mInputs[0].CUDA, GetInputWidth(), GetInputHeight(),
+				make_float2(0.0f, 1.0f),
+				make_float3(0.5f, 0.5f, 0.5f),
+				make_float3(0.5f, 0.5f, 0.5f),
+				GetStream()));
+		} else { // ONNX_YOLO
+			// I do not know why they keep failing aspec ration of the input images, but I am not like they!
+			b_failed = CUDA_FAILED(cudaTensorNormMeanKeepAspectRGB(input, format, width, height,
+				mInputs[0].CUDA, GetInputWidth(), GetInputHeight(),
+				make_float2(0.0f, 1.0f),
+				make_float3(0.0f, 0.0f, 0.0f),
+				make_float3(1.0f, 1.0f, 1.0f),
+				GetStream()));
+		}
+
+		if (b_failed)
 		{
 			LogError(LOG_TRT "detectNet::Detect() -- cudaTensorNormMeanRGB() failed\n");
 			return false;
@@ -608,9 +630,13 @@ int detectNet::postProcess( void* input, uint32_t width, uint32_t height, imageF
 
 	if( IsModelType(MODEL_UFF) )	
 		numDetections = postProcessSSD_UFF(detections, width, height);
-	else if( IsModelType(MODEL_ONNX) )
-		numDetections = postProcessSSD_ONNX(detections, width, height);
-	else if( IsModelType(MODEL_CAFFE) )
+	else if( IsModelType(MODEL_ONNX) ) {
+		if(mONNXKind == ONNX_SSD) {
+			numDetections = postProcessSSD_ONNX(detections, width, height);
+		} else {
+			numDetections = postProcessYOLO_ONNX(detections, width, height);
+		}
+	} else if( IsModelType(MODEL_CAFFE) )
 		numDetections = postProcessDetectNet(detections, width, height);
 	else if( IsModelType(MODEL_ENGINE) )
 		numDetections = postProcessDetectNet_v2(detections, width, height);
@@ -739,6 +765,208 @@ int detectNet::postProcessSSD_ONNX( Detection* detections, uint32_t width, uint3
 	return numDetections;
 }
 
+// shamlessly stolen form OpenCV
+template <typename T>
+static inline bool SortScorePairDescend(const std::pair<float, T>& pair1, const std::pair<float, T>& pair2)
+{
+	return pair1.first > pair2.first;
+}
+
+// Get max scores with corresponding indices.
+//    scores: a set of scores.
+//    threshold: only consider scores higher than the threshold.
+//    top_k: if -1, keep all; otherwise, keep at most top_k.
+//    score_index_vec: store the sorted (score, index) pair.
+inline void GetMaxScoreIndex(const detectNet::Detection* det, const int count, const float threshold, const int top_k,
+	std::vector<std::pair<float, int> >& score_index_vec)
+{
+	// Generate index score pairs.
+	for (int i = 0; i < count; ++i) {
+		if (det[i].Confidence > threshold) {
+			score_index_vec.push_back(std::make_pair(det[i].Confidence, i));
+		}
+	}
+
+	// Sort the score pair according to the scores in descending order
+	std::stable_sort(score_index_vec.begin(), score_index_vec.end(),
+		SortScorePairDescend<int>);
+
+	// Keep top_k scores if needed.
+	if (top_k > 0 && top_k < (int)score_index_vec.size())
+	{
+		score_index_vec.resize(top_k);
+	}
+}
+
+/**
+ * @brief measure dissimilarity between two sample sets
+ *
+ * computes the complement of the Jaccard Index as described in <https://en.wikipedia.org/wiki/Jaccard_index>.
+ * For rectangles this reduces to computing the intersection over the union.
+ */
+static inline double jaccardDistance(const detectNet::Detection& a, const detectNet::Detection& b) {
+	float Aa = a.Area();
+	float Ab = b.Area();
+
+	if ((Aa + Ab) <= std::numeric_limits<float>::epsilon()) {
+		// jaccard_index = 1 -> distance = 0
+		return 0.0;
+	}
+
+	double Aab = a.IntersectionArea(b);
+	// distance = 1 - jaccard_index
+	return 1.0 - Aab / (Aa + Ab - Aab);
+}
+
+float computeOverlap(const detectNet::Detection& a, const detectNet::Detection& b) {
+	return 1.f - static_cast<float>(jaccardDistance(a, b));
+}
+
+inline void NMSFast_(const detectNet::Detection* det, const int count, const float score_threshold, const float nms_threshold,
+	const float eta, const int top_k, std::vector<int>& indices, int limit = INT_MAX)
+{
+	// Get top_k scores (with corresponding indices).
+	std::vector<std::pair<float, int> > score_index_vec;
+	GetMaxScoreIndex(det, count, score_threshold, top_k, score_index_vec);
+
+	// Do nms.
+	float adaptive_threshold = nms_threshold;
+	indices.clear();
+
+	for (size_t i = 0; i < score_index_vec.size(); ++i) {
+		const int idx = score_index_vec[i].second;
+		bool keep = true;
+		for (int k = 0; k < (int)indices.size() && keep; ++k) {
+			const int kept_idx = indices[k];
+			float overlap = computeOverlap(det[idx], det[kept_idx]);
+			float overlap2 = det[idx].IOU(det[kept_idx]);
+			keep = overlap <= adaptive_threshold;
+		}
+		if (keep) {
+			indices.push_back(idx);
+			if (indices.size() >= limit) {
+				break;
+			}
+		}
+		if (keep && eta < 1 && adaptive_threshold > 0.5) {
+			adaptive_threshold *= eta;
+		}
+	}
+}
+
+int detectNet::postProcessYOLO_ONNX( Detection* detections, uint32_t width, uint32_t height )
+{
+    const std::vector<std::string> classNames = {
+            "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+            "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+            "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+            "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+            "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+            "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+            "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone",
+            "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+            "hair drier", "toothbrush"
+    };
+
+	const uint32_t numChannels = DIMS_C(mOutputs[0].dims);
+	const uint32_t numAnchors = DIMS_H(mOutputs[0].dims);
+
+	//auto numClasses = classNames.size();
+	int numClasses = GetNumClasses();
+
+	if(numClasses > numChannels - 4) {
+		LogError(LOG_TRT "detectNet -- postProcessYOLO_ONNX() numClasses > numAnchors, which is an error\n");
+		return 0;
+	}
+
+	int numDetections = 0;
+
+	const float* output = mOutputs[0].CPU;
+	//cv::Mat output = cv::Mat(numChannels, numAnchors, CV_32F, featureVector.data());
+	//output = output.t();
+
+	int rowStride = numAnchors;
+	int colStride = 1;
+
+	const float ratio = 1.0f / fminf(float(GetInputWidth()) / float(width), float(GetInputHeight())/float(height));
+	const float scale_x = ratio;
+	const float scale_y = ratio;
+
+	//const float scale_x = float(width) / float(GetInputWidth());
+	//const float scale_y = float(height)/float(GetInputHeight());
+
+	// Get all the YOLO proposals
+	for (int i = 0; i < numAnchors; i++) {
+		//const float* rowPtr = output + i * numChannels;
+		const float* rowPtr = output + i * colStride;
+		const float* bboxesPtr = rowPtr;
+		const float* scoresPtr = rowPtr + 4*rowStride;
+
+		//const float* maxSPtr = std::max_element(scoresPtr, scoresPtr + numClasses);
+		//float score = *maxSPtr;
+		//ptrdiff_t class_id = maxSPtr - scoresPtr;
+
+		float score = *scoresPtr;
+		ptrdiff_t class_id = 0;
+		for(int j=1;j<numClasses;++j) {
+			float new_score = *(scoresPtr + j * rowStride);
+			if(new_score > score) {
+				score = new_score;
+				class_id = j;
+			}
+		}
+
+		float x = *(bboxesPtr + 0*rowStride);
+		float y = *(bboxesPtr + 1*rowStride);
+		float w = *(bboxesPtr + 2*rowStride);
+		float h = *(bboxesPtr + 3*rowStride);
+
+		if (score > mConfidenceThreshold) {
+#if 0
+			printf("Class: %d x: %.2f y: %.2f w: %.2f h: %.2f\n", class_id, x, y, w, h);
+			for (int j = 0; j < numClasses; ++j) {
+				printf("%.3f ", *(scoresPtr + j*rowStride));
+			}
+			printf("\n");
+#endif
+
+			float x0 = fminf(fmaxf((x - 0.5f * w)*scale_x, 0.f), width);
+			float y0 = fminf(fmaxf((y - 0.5f * h)*scale_y, 0.f), height);
+			float x1 = fminf(fmaxf((x + 0.5f * w)*scale_x, 0.f), width);
+			float y1 = fminf(fmaxf((y + 0.5f * h)*scale_y, 0.f), height);
+
+			detections[numDetections].TrackID   = -1;
+			detections[numDetections].ClassID    = (uint32_t)class_id;
+			detections[numDetections].Confidence = score;
+
+			detections[numDetections].Left   = x0;
+			detections[numDetections].Top    = y0;
+			detections[numDetections].Right  = x1;
+			detections[numDetections].Bottom = y1;
+
+			numDetections++;
+		}
+	}
+
+	const float nmsThreshold = 0.65f;
+	const int topK = 0;
+	const float eta = 1.0f;
+
+	std::vector<int> indices;
+
+	NMSFast_(detections, numDetections, mConfidenceThreshold, nmsThreshold, eta, topK, indices);
+	const int num_indices = (int)indices.size();
+	if(num_indices != numDetections) {
+		std::sort(indices.begin(), indices.end());
+		int cur_idx = 0;
+		for (int i = 0; i < num_indices; ++i) {
+			detections[cur_idx++] = detections[indices[i]];
+		}
+		numDetections = num_indices;
+	}
+
+	return numDetections;
+}
 
 // postProcessDetectNet
 int detectNet::postProcessDetectNet( Detection* detections, uint32_t width, uint32_t height )
