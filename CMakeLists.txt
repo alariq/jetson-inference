@@ -187,7 +187,7 @@ execute_process( COMMAND "${CMAKE_COMMAND}" "-E" "create_symlink" "${PROJECT_SOU
 add_subdirectory(examples)
 add_subdirectory(tools)
 add_subdirectory(utils)
-add_subdirectory(python)
+#add_subdirectory(python)
 
 
 # set linker options
