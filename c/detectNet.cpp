@@ -354,13 +354,19 @@ if( !FindModel(DETECTNET_MODEL_TYPE, modelName) )
 		const char* out_bbox     = cmdLine.GetString("output_bbox");
 		const char* class_labels = cmdLine.GetString("class_labels");
 		const char* class_colors = cmdLine.GetString("class_colors");
-		
-		if( !input ) 	
-			input = DETECTNET_DEFAULT_INPUT;
 
-		if( !out_blob )
-		{
-			if( !out_cvg )  out_cvg  = DETECTNET_DEFAULT_COVERAGE;
+		const ONNXKind ONNXKind = ONNXKindFromStr(modelName);
+		if (ONNXKind == ONNX_YOLO) {
+			input = YOLO_DEFAULT_INPUT;
+			out_blob = YOLO_DEFAULT_BBOX;
+		}
+		
+		if( !input ) { 	
+			input = DETECTNET_DEFAULT_INPUT;
+		}
+
+		if( !out_blob ) {
+			if( !out_cvg ) out_cvg  = DETECTNET_DEFAULT_COVERAGE;
 			if( !out_bbox ) out_bbox = DETECTNET_DEFAULT_BBOX;
 		}
 

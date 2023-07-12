@@ -1895,7 +1895,10 @@ bool tensorNet::LoadClassLabels( const char* filename, std::vector<std::string>&
 			//printf("a=%s b=%s (custom non-synset)\n", a, str);
 			customClasses++;
 
-			if( str[len-1] == '\n' )
+			if (str[len - 2] == '\r' && str[len - 1] == '\n')
+				str[len - 2] = 0;
+
+			if( str[len-1] == '\n' || str[len-1] == '\r' )
 				str[len-1] = 0;
 
 			synsets.push_back(a);

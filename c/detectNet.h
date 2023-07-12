@@ -32,6 +32,7 @@
  * @ingroup detectNet
  */
 #define DETECTNET_DEFAULT_INPUT   "data"
+#define YOLO_DEFAULT_INPUT   "images"
 
 /**
  * Name of default output blob of the coverage map for DetectNet caffe model.
@@ -44,6 +45,7 @@
  * @ingroup detectNet
  */
 #define DETECTNET_DEFAULT_BBOX  "bboxes"
+#define YOLO_DEFAULT_BBOX  "output0"
 
 /**
  * Default value of the minimum detection threshold
