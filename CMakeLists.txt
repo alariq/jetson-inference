@@ -127,9 +127,17 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_OUTPUT_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_OUTPUT_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_OUTPUT_DIR}/lib)
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GLIB REQUIRED glib-2.0)
+
 # build C/C++ library
 include_directories(${PROJECT_INCLUDE_DIR} ${PROJECT_INCLUDE_DIR}/jetson-inference ${PROJECT_INCLUDE_DIR}/jetson-utils)
 include_directories(/usr/include/gstreamer-1.0 /usr/lib/${CMAKE_SYSTEM_PROCESSOR}/gstreamer-1.0/include /usr/include/glib-2.0 /usr/include/libxml2 /usr/lib/${CMAKE_SYSTEM_PROCESSOR}/glib-2.0/include/)
+include_directories(${GLIB_INCLUDE_DIRS})
+
+# tensorrt on my Linux is in custom directory
+link_directories(${CMAKE_PREFIX_PATH}/lib)
+include_directories(${CMAKE_PREFIX_PATH}/include/)
 
 file(GLOB inferenceSources c/*.cpp c/*.cu c/calibration/*.cpp c/tracking/*.cpp)
 file(GLOB inferenceIncludes c/*.h c/*.cuh c/calibration/*.h c/tracking/*.h)
@@ -154,6 +162,7 @@ endif()
 	
 cuda_add_library(jetson-inference SHARED ${inferenceSources} ${pluginSources})
 target_include_directories(jetson-inference PRIVATE ${PROJECT_SOURCE_DIR}/c/plugins/pose/trt_pose/parse)
+
 
 # transfer all headers to the include directory
 file(MAKE_DIRECTORY ${PROJECT_INCLUDE_DIR}/jetson-inference)
