@@ -8,3 +8,4 @@ logs/
 *.pem
 .vimspector.session
 .vs/
+.ccls-cache/
