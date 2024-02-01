@@ -9,3 +9,4 @@ logs/
 .vimspector.session
 .vs/
 .ccls-cache/
+.vscode/
