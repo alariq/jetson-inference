@@ -10,3 +10,6 @@ logs/
 .vs/
 .ccls-cache/
 .vscode/
+imgui.ini
+Session.vim
+compile_commands.json
